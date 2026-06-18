@@ -41,6 +41,45 @@ from tools.time_tool import TimeTool
 logger = structlog.get_logger(__name__)
 
 
+def _resolve_slm_model(settings: Settings) -> str:
+    """Pick the best available model for SLM privacy judge.
+
+    Never returns a cloud model — the SLM judge decides whether data is
+    safe to send to cloud, so running it on cloud defeats the purpose.
+
+    Fallback: dedicated SLM model → edge main model.
+    """
+    slm_model = settings.privacy.slm_model
+    edge_model = settings.edge_llm.model_name
+
+    # Check if dedicated SLM model is pulled in Ollama
+    try:
+        import httpx
+
+        resp = httpx.get(
+            settings.edge_llm.base_url.replace("/v1", "/api/tags"),
+            timeout=3.0,
+        )
+        if resp.status_code == 200:
+            available = {m["name"] for m in resp.json().get("models", [])}
+            if slm_model in available:
+                logger.info("slm_dedicated_model_found", model=slm_model)
+                return slm_model
+            logger.info(
+                "slm_model_not_found",
+                requested=slm_model,
+                fallback=edge_model,
+            )
+            return edge_model
+    except Exception:
+        pass
+
+    # If we can't check, assume the dedicated model might not exist,
+    # fall back to edge main model which we know works
+    logger.info("slm_fallback_to_edge", model=edge_model)
+    return edge_model
+
+
 def _check_edge_available(settings: Settings) -> bool:
     """Check if edge LLM (Ollama) is available."""
     import httpx
@@ -205,19 +244,30 @@ def create_components() -> AppComponents:
         role=AgentRole.CLOUD,
     )
 
-    # Privacy engine — use cloud LLM for SLM judge if edge is unavailable
+    # Privacy engine — SLM judge must NEVER use cloud.
+    # The SLM judge decides whether data is safe to send to cloud,
+    # so sending data to cloud for that decision defeats the purpose.
+    #
+    # Fallback chain:
+    #   1. Dedicated SLM model (e.g. qwen2.5:1.5b) — if pulled in Ollama
+    #   2. Edge main model (e.g. qwen2.5:7b) — reuse existing model
+    #   3. No-op (conservative S2 default) — privacy engine handles this
     if edge_available:
+        # Check if the dedicated SLM model exists in Ollama
+        slm_model = _resolve_slm_model(settings)
         slm_client = OpenAICompatibleClient(
             provider="ollama",
-            model_name=settings.privacy.slm_model,
+            model_name=slm_model,
             base_url=settings.edge_llm.base_url,
             api_key=settings.edge_llm.api_key,
             temperature=0.1,
             max_tokens=256,
         )
+        logger.info("slm_client_created", model=slm_model)
     else:
-        slm_client = cloud_client
-        logger.warning("slm_using_cloud_fallback")
+        # Edge unavailable — privacy engine will default to S2 without SLM
+        slm_client = None
+        logger.warning("slm_unavailable_edge_down")
 
     privacy_detector = ThreeLayerPrivacyDetector(slm_client=slm_client)
     sanitizer = RegexSanitizer()

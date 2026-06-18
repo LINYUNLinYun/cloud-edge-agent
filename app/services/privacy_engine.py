@@ -143,9 +143,12 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
     - If regex finds high-confidence PII → S2 immediately
     - If NER finds entities → S2
     - Otherwise, ask SLM for judgment
+
+    SLM client MUST be local — never cloud. If edge is unavailable
+    (slm_client is None), Layer 3 is skipped and S2 is the default.
     """
 
-    def __init__(self, slm_client: LLMClient) -> None:
+    def __init__(self, slm_client: LLMClient | None) -> None:
         self._slm_client = slm_client
 
     async def detect(self, text: str) -> PrivacyDetection:
@@ -180,15 +183,24 @@ class ThreeLayerPrivacyDetector(PrivacyDetector):
                 reason=f"NER detected {len(ner_entities)} entities",
             )
 
-        # Layer 3: SLM judge
-        slm_result = await _slm_judge(text, self._slm_client)
-        slm_result.entities = []
-        logger.info(
-            "privacy_slm_judge",
-            level=slm_result.level.value,
-            confidence=slm_result.confidence,
+        # Layer 3: SLM judge — only when edge is available
+        if self._slm_client is not None:
+            slm_result = await _slm_judge(text, self._slm_client)
+            slm_result.entities = []
+            logger.info(
+                "privacy_slm_judge",
+                level=slm_result.level.value,
+                confidence=slm_result.confidence,
+            )
+            return slm_result
+
+        # No local SLM — conservative default, never cloud
+        logger.info("privacy_slm_skipped", reason="edge_unavailable")
+        return PrivacyDetection(
+            level=PrivacyLevel.S2,
+            confidence=0.5,
+            reason="SLM unavailable (edge down), defaulting to S2",
         )
-        return slm_result
 
 
 # ---------------------------------------------------------------------------

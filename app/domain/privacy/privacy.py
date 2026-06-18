@@ -9,9 +9,10 @@ from enum import Enum
 # ---------------------------------------------------------------------------
 
 class PrivacyLevel(str, Enum):
-    S1 = "S1"  # safe — can go to cloud directly
-    S2 = "S2"  # sensitive — sanitize before cloud
-    S3 = "S3"  # confidential — must stay local
+    S1 = "S1"      # safe — can go to cloud directly
+    S2 = "S2"      # sensitive — sanitize before cloud
+    S3 = "S3"      # confidential — must stay local
+    NA = "N/A"     # not applicable — privacy detection skipped (low complexity)
 
 
 @dataclass

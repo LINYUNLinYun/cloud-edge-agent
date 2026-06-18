@@ -17,7 +17,7 @@ class LogLevel(str, Enum):
 class EdgeLLMSettings(BaseSettings):
     """Edge (local) LLM configuration."""
 
-    model_config = {"env_prefix": "EDGE_LLM_"}
+    model_config = {"env_prefix": "EDGE_LLM_", "env_file": ".env", "extra": "ignore"}
 
     provider: str = Field(default="ollama", description="Local LLM provider")
     base_url: str = Field(
@@ -34,7 +34,7 @@ class EdgeLLMSettings(BaseSettings):
 class CloudLLMSettings(BaseSettings):
     """Cloud LLM configuration."""
 
-    model_config = {"env_prefix": "CLOUD_LLM_"}
+    model_config = {"env_prefix": "CLOUD_LLM_", "env_file": ".env", "extra": "ignore"}
 
     provider: str = Field(default="deepseek", description="Cloud LLM provider")
     base_url: str = Field(
@@ -49,7 +49,7 @@ class CloudLLMSettings(BaseSettings):
 class PrivacySettings(BaseSettings):
     """Privacy engine configuration."""
 
-    model_config = {"env_prefix": "PRIVACY_"}
+    model_config = {"env_prefix": "PRIVACY_", "env_file": ".env", "extra": "ignore"}
 
     slm_model: str = Field(
         default="qwen2.5:1.5b", description="SLM for privacy judgment"
@@ -60,7 +60,7 @@ class PrivacySettings(BaseSettings):
 class VectorStoreSettings(BaseSettings):
     """Vector store configuration."""
 
-    model_config = {"env_prefix": "QDRANT_"}
+    model_config = {"env_prefix": "QDRANT_", "env_file": ".env", "extra": "ignore"}
 
     provider: str = Field(default="qdrant", description="Vector DB provider")
     url: str = Field(

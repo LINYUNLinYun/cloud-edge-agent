@@ -23,6 +23,7 @@ from app.domain.privacy.policy import (
 from app.domain.privacy.privacy import (
     PrivacyDetection,
     PrivacyDetector,
+    PrivacyLevel,
     Sanitizer,
 )
 
@@ -83,10 +84,16 @@ class CollaborativeOrchestrator:
     """The main orchestrator that coordinates edge + cloud agents.
 
     Flow:
-    1. Detect privacy level (PrivacyDetector)
-    2. Analyze task complexity (edge SLM)
-    3. Apply routing policy (route matrix)
+    1. Analyze task complexity (edge SLM) — cheap, always available
+    2. If low complexity (L1-L2) → skip privacy detection, route to Edge
+    3. If high complexity (L3-L5) → run privacy detection → route matrix
     4. Execute the chosen collaborate mode
+
+    Privacy detection is deferred for low-complexity tasks because:
+    - The routing matrix always sends low-complexity tasks to Edge regardless
+      of privacy level (S1/S2/S3 low → Edge).
+    - Running NER + SLM judge is wasteful and fragile when data never leaves
+      the local device.
     """
 
     def __init__(
@@ -111,13 +118,44 @@ class CollaborativeOrchestrator:
         """Process a user query through the full routing pipeline."""
         start_time = time.monotonic()
 
-        # Step 1: Privacy detection
-        privacy_result = await self._detector.detect(query)
-
-        # Step 2: Complexity analysis
+        # Step 1: Complexity analysis first (uses edge model, always available)
         complexity = await analyze_complexity(query, self._edge)
 
-        # Step 3: Route based on privacy and complexity
+        # Step 2: If low complexity → always Edge, skip privacy detection
+        complexity_group = "low" if complexity.value <= 2 else "high"
+        if complexity_group == "low":
+            routing = route(
+                privacy_level=PrivacyLevel.NA,
+                complexity=complexity,
+            )
+
+            logger.info(
+                "orchestrator_routing",
+                session_id=session_id,
+                mode=routing.mode.value,
+                privacy="N/A",
+                complexity=complexity.value,
+            )
+
+            answer = await self._mode_direct_local(query)
+
+            elapsed_ms = (time.monotonic() - start_time) * 1000
+            return OrchestratorResult(
+                answer=answer,
+                mode=routing.mode,
+                routing=routing,
+                privacy_detection=PrivacyDetection(
+                    level=PrivacyLevel.NA,
+                    confidence=1.0,
+                    reason="low complexity, local only, privacy detection skipped",
+                ),
+                latency_ms=round(elapsed_ms, 1),
+            )
+
+        # Step 3: High complexity → may go cloud, run privacy detection
+        privacy_result = await self._detector.detect(query)
+
+        # Step 4: Route based on privacy and complexity
         routing = route(
             privacy_level=privacy_result.level,
             complexity=complexity,
@@ -131,7 +169,7 @@ class CollaborativeOrchestrator:
             complexity=complexity.value,
         )
 
-        # Step 4: Execute mode
+        # Step 5: Execute mode
         answer = await self._execute_mode(
             mode=routing.mode,
             query=query,

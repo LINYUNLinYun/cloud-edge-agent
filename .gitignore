@@ -34,6 +34,9 @@ coverage.xml
 # ruff
 .ruff_cache/
 
+# Models (download separately, too large for git)
+models/
+
 # OS
 .DS_Store
 Thumbs.db

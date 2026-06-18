@@ -203,7 +203,12 @@ def create_components() -> AppComponents:
     """Factory that wires up all application components.
 
     Called once during app startup (lifespan).
-    Gracefully degrades when edge services (Ollama, Qdrant) are unavailable.
+
+    LLM architecture:
+    - Edge (local): Ollama API at http://localhost:11434/v1
+    - Cloud: DeepSeek API at https://api.deepseek.com/v1
+    - Both use the same OpenAICompatibleClient interface
+    - If Ollama unavailable, edge falls back to cloud
     """
     settings = get_settings()
 
@@ -217,22 +222,28 @@ def create_components() -> AppComponents:
         qdrant=qdrant_available,
     )
 
-    # LLM clients — use cloud as fallback if edge is unavailable
+    # === Unified LLM Interface ===
+    # Both edge and cloud use OpenAICompatibleClient
+    # Only difference is base_url (local vs remote API)
     cloud_client = create_cloud_llm_client(settings.cloud_llm)
+
     if edge_available:
+        # Local Ollama service
         edge_client = create_edge_llm_client(settings.edge_llm)
         logger.info("using_edge_llm", model=settings.edge_llm.model_name)
     else:
+        # Fallback: use cloud for edge operations too
         edge_client = cloud_client
         logger.warning(
             "edge_unavailable_using_cloud",
+            hint="Run 'scripts/start_local_llm.bat' to enable local LLM",
             fallback=settings.cloud_llm.model_name,
         )
 
     # Tools
     tool_registry = _create_tool_registry()
 
-    # Agents (ReAct with tools)
+    # Agents (both use the same interface)
     edge_agent = ReActAgent(
         llm_client=edge_client,
         tool_registry=tool_registry,
@@ -272,12 +283,15 @@ def create_components() -> AppComponents:
     privacy_detector = ThreeLayerPrivacyDetector(slm_client=slm_client)
     sanitizer = RegexSanitizer()
 
-    # Memory & session
+    # === Memory Architecture ===
+    # Short-term: in-memory (current session, fast)
+    # Cloud: Qdrant (S1 conversations, vector search)
+    # Local: SQLite (S2/S3 conversations, never leaves device)
     session_store = InMemorySessionStore()
     short_term_memory = InMemoryShortTermStore()
     cache = InMemoryCache()
 
-    # Cloud memory (Qdrant) for S1 conversations — only if available
+    # Cloud memory (Qdrant) for S1 conversations
     cloud_memory = None
     rag_pipeline = None
     if qdrant_available:
@@ -287,11 +301,11 @@ def create_components() -> AppComponents:
     else:
         logger.warning("qdrant_unavailable_cloud_memory_disabled")
 
-    # Local memory (SQLite) for S2/S3 conversations — always available
+    # Local memory (SQLite) for S2/S3 conversations
     local_memory = SQLiteMemoryStore(db_path="data/local_memory.db")
     logger.info("local_memory_enabled", path="data/local_memory.db")
 
-    # Orchestrator (with agents for tool-calling support)
+    # Orchestrator
     orchestrator = CollaborativeOrchestrator(
         edge_client=edge_client,
         cloud_client=cloud_client,

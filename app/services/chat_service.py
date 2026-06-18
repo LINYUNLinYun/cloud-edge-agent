@@ -5,6 +5,10 @@ Flow: Request → Session → Memory Retrieval → Orchestrator → Memory Store
 Privacy-aware storage routing:
   - S1 (Safe) → Qdrant cloud (long-term memory)
   - S2/S3 (Sensitive/Confidential) → SQLite local (never leaves device)
+
+Session cache architecture:
+  - In-memory cache for fast access
+  - Automatic persistence based on privacy level
 """
 
 import asyncio
@@ -14,6 +18,7 @@ from dataclasses import dataclass
 
 from app.core.logger.logger import get_logger
 from app.domain.memory.memory import MemoryEntry, MemoryStore
+from app.infrastructure.cache.session_cache import SessionCacheManager
 from app.infrastructure.database.session_repository import InMemorySessionStore
 from app.infrastructure.rag.pipeline import RAGPipeline
 from app.services.agent_orchestrator import (
@@ -24,7 +29,7 @@ from app.services.agent_orchestrator import (
 logger = get_logger(__name__)
 
 # Maximum number of recent messages to inject as context
-_MAX_CONTEXT_MESSAGES = 5
+_MAX_CONTEXT_MESSAGES = 10
 
 
 @dataclass
@@ -42,9 +47,10 @@ class ChatResponse:
 class ChatService:
     """Orchestrates a chat request through the full pipeline.
 
-    Privacy-aware storage:
-    - S1 conversations → cloud memory (Qdrant)
-    - S2/S3 conversations → local memory (SQLite)
+    Uses SessionCacheManager for:
+    - Fast in-memory session access
+    - Privacy-aware persistence (S1→Qdrant, S2/S3→SQLite)
+    - Unified search across all memory sources
     """
 
     def __init__(
@@ -59,9 +65,13 @@ class ChatService:
         self._orchestrator = orchestrator
         self._sessions = session_store
         self._short_term = short_term_memory
-        self._cloud_memory = cloud_memory  # Qdrant (for S1)
-        self._local_memory = local_memory  # SQLite (for S2/S3)
         self._rag = rag_pipeline
+
+        # Session cache with privacy-aware persistence
+        self._cache = SessionCacheManager(
+            cloud_memory=cloud_memory,
+            local_memory=local_memory,
+        )
 
     async def chat(
         self, query: str, session_id: str | None = None
@@ -69,10 +79,10 @@ class ChatService:
         """Process a chat message end-to-end.
 
         1. Ensure session exists
-        2. Retrieve relevant memory context
+        2. Retrieve context from cache + persistent storage
         3. Enrich query with context
         4. Run orchestrator (privacy → complexity → route → execute)
-        5. Store user message and response in memory (privacy-aware routing)
+        5. Store in cache + persist based on privacy level
         6. Return structured response
         """
         # Ensure session
@@ -83,8 +93,32 @@ class ChatService:
         if self._sessions.get(session_id) is None:
             self._sessions.create(session_id)
 
-        # Retrieve memory context
-        context = await self._retrieve_context(query, session_id)
+        # Retrieve context from cache + persistent storage
+        context = await self._cache.get_context(
+            session_id=session_id,
+            query=query,
+            max_entries=_MAX_CONTEXT_MESSAGES,
+        )
+
+        # Also get RAG context if available
+        if self._rag is not None:
+            try:
+                rag_results = await self._rag.retrieve(query, top_k=3)
+                for result in rag_results:
+                    context.append(
+                        MemoryEntry(
+                            content=result.document.content,
+                            metadata={
+                                **result.document.metadata,
+                                "source": "rag",
+                                "score": result.score,
+                            },
+                            session_id=session_id,
+                        )
+                    )
+            except Exception as exc:
+                logger.warning("rag_retrieval_failed", error=str(exc))
+
         enriched_query = self._enrich_query(query, context)
 
         # Run orchestrator
@@ -92,40 +126,39 @@ class ChatService:
             query=enriched_query, session_id=session_id
         )
 
-        # Store user message in short-term memory
+        # Store in session store (for API compatibility)
         self._sessions.add_message(session_id, "user", query)
-        await self._short_term.add(
-            MemoryEntry(content=query, session_id=session_id, metadata={"role": "user"})
-        )
-
-        # Store assistant response in short-term memory
         self._sessions.add_message(session_id, "assistant", result.answer)
-        await self._short_term.add(
-            MemoryEntry(
-                content=result.answer,
-                session_id=session_id,
-                metadata={"role": "assistant", "mode": result.mode.value},
-            )
-        )
 
-        # Privacy-aware long-term storage
+        # Store in cache + persist based on privacy level
         privacy_level = result.routing.privacy_level.value
+
+        user_entry = MemoryEntry(
+            content=query,
+            session_id=session_id,
+            metadata={"role": "user", "privacy_level": privacy_level},
+        )
+        assistant_entry = MemoryEntry(
+            content=result.answer,
+            session_id=session_id,
+            metadata={
+                "role": "assistant",
+                "mode": result.mode.value,
+                "privacy_level": privacy_level,
+            },
+        )
         conversation_entry = MemoryEntry(
             content=f"User: {query}\nAssistant: {result.answer}",
             session_id=session_id,
             metadata={"mode": result.mode.value, "privacy_level": privacy_level},
         )
 
-        if privacy_level == "S1":
-            # Safe → store in cloud (Qdrant)
-            if self._cloud_memory is not None:
-                await self._cloud_memory.add(conversation_entry)
-                logger.info("stored_in_cloud", privacy_level=privacy_level)
-        else:
-            # S2/S3 → store locally (SQLite)
-            if self._local_memory is not None:
-                await self._local_memory.add(conversation_entry)
-                logger.info("stored_locally", privacy_level=privacy_level)
+        # Add to cache (handles persistence automatically)
+        await self._cache.add(session_id, user_entry, privacy_level)
+        await self._cache.add(session_id, assistant_entry, privacy_level)
+
+        # Also persist the full conversation pair
+        await self._cache.persist_conversation(session_id, conversation_entry, privacy_level)
 
         logger.info(
             "chat_complete",
@@ -134,6 +167,7 @@ class ChatService:
             privacy_level=privacy_level,
             latency_ms=result.latency_ms,
             context_messages=len(context),
+            cache_stats=self._cache.get_stats(),
         )
 
         return ChatResponse(
@@ -165,49 +199,44 @@ class ChatService:
         if self._sessions.get(session_id) is None:
             self._sessions.create(session_id)
 
-        # Retrieve memory context
-        context = await self._retrieve_context(query, session_id)
+        # Retrieve context
+        context = await self._cache.get_context(
+            session_id=session_id,
+            query=query,
+            max_entries=_MAX_CONTEXT_MESSAGES,
+        )
         enriched_query = self._enrich_query(query, context)
 
-        # Run orchestrator (full pipeline)
+        # Run orchestrator
         result: OrchestratorResult = await self._orchestrator.process(
             query=enriched_query, session_id=session_id
         )
 
-        # Store in memory
+        # Store in session store
         self._sessions.add_message(session_id, "user", query)
-        await self._short_term.add(
-            MemoryEntry(content=query, session_id=session_id, metadata={"role": "user"})
-        )
         self._sessions.add_message(session_id, "assistant", result.answer)
-        await self._short_term.add(
-            MemoryEntry(
-                content=result.answer,
-                session_id=session_id,
-                metadata={"role": "assistant", "mode": result.mode.value},
-            )
-        )
 
-        # Privacy-aware long-term storage
+        # Store in cache + persist
         privacy_level = result.routing.privacy_level.value
-        conversation_entry = MemoryEntry(
-            content=f"User: {query}\nAssistant: {result.answer}",
+        user_entry = MemoryEntry(
+            content=query,
             session_id=session_id,
-            metadata={"mode": result.mode.value, "privacy_level": privacy_level},
+            metadata={"role": "user", "privacy_level": privacy_level},
         )
-        if privacy_level == "S1":
-            if self._cloud_memory is not None:
-                await self._cloud_memory.add(conversation_entry)
-        else:
-            if self._local_memory is not None:
-                await self._local_memory.add(conversation_entry)
+        assistant_entry = MemoryEntry(
+            content=result.answer,
+            session_id=session_id,
+            metadata={"role": "assistant", "mode": result.mode.value, "privacy_level": privacy_level},
+        )
+        await self._cache.add(session_id, user_entry, privacy_level)
+        await self._cache.add(session_id, assistant_entry, privacy_level)
 
         # Stream metadata first
         metadata = {
             "type": "metadata",
             "session_id": session_id,
             "mode": result.mode.value,
-            "privacy_level": result.routing.privacy_level.value,
+            "privacy_level": privacy_level,
             "complexity": result.routing.complexity.value,
             "latency_ms": result.latency_ms,
         }
@@ -230,77 +259,6 @@ class ChatService:
             mode=result.mode.value,
             latency_ms=result.latency_ms,
         )
-
-    async def _retrieve_context(
-        self, query: str, session_id: str
-    ) -> list[MemoryEntry]:
-        """Retrieve relevant context from all memory sources.
-
-        Sources:
-        1. Short-term: recent messages from the current session
-        2. Cloud memory (Qdrant): S1 past conversations
-        3. Local memory (SQLite): S2/S3 past conversations
-        4. RAG: relevant document chunks (if pipeline available)
-        """
-        context: list[MemoryEntry] = []
-
-        # Short-term: recent session messages (always available)
-        recent = await self._short_term.search(query, top_k=_MAX_CONTEXT_MESSAGES)
-        session_recent = [e for e in recent if e.session_id == session_id]
-        context.extend(session_recent)
-
-        # Cloud memory: S1 conversations (Qdrant vector search)
-        if self._cloud_memory is not None:
-            try:
-                cloud_hits = await self._cloud_memory.search(
-                    query, top_k=_MAX_CONTEXT_MESSAGES
-                )
-                logger.info(
-                    "cloud_memory_search",
-                    query=query[:50],
-                    hits=len(cloud_hits),
-                    contents=[h.content[:50] for h in cloud_hits],
-                )
-                context.extend(cloud_hits)
-            except Exception as exc:
-                logger.warning("cloud_memory_search_failed", error=str(exc))
-
-        # Local memory: S2/S3 conversations (SQLite keyword search)
-        if self._local_memory is not None:
-            try:
-                local_hits = await self._local_memory.search(
-                    query, top_k=_MAX_CONTEXT_MESSAGES
-                )
-                logger.info(
-                    "local_memory_search",
-                    query=query[:50],
-                    hits=len(local_hits),
-                    contents=[h.content[:50] for h in local_hits],
-                )
-                context.extend(local_hits)
-            except Exception as exc:
-                logger.warning("local_memory_search_failed", error=str(exc))
-
-        # RAG: document retrieval
-        if self._rag is not None:
-            try:
-                rag_results = await self._rag.retrieve(query, top_k=_MAX_CONTEXT_MESSAGES)
-                for result in rag_results:
-                    context.append(
-                        MemoryEntry(
-                            content=result.document.content,
-                            metadata={
-                                **result.document.metadata,
-                                "source": "rag",
-                                "score": result.score,
-                            },
-                            session_id=session_id,
-                        )
-                    )
-            except Exception as exc:
-                logger.warning("rag_retrieval_failed", error=str(exc))
-
-        return context
 
     @staticmethod
     def _enrich_query(query: str, context: list[MemoryEntry]) -> str:

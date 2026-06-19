@@ -71,7 +71,7 @@ async def _ner_detect(text: str) -> list[SensitiveEntity]:
         from presidio_analyzer import AnalyzerEngine
 
         analyzer = AnalyzerEngine()
-        results = analyzer.analyze(text=text, language="zh")
+        results = analyzer.analyze(text=text, language="en")
         return [
             SensitiveEntity(
                 entity_type=result.entity_type,

@@ -6,7 +6,7 @@
   - 对比两者的云端 token 消耗和成本差异
 
 DeepSeek API 定价 (2026):
-  - deepseek-chat: 输入 ¥1/M tokens, 输出 ¥2/M tokens
+  - deepseek-chat: 输入 CNY 1/M tokens, 输出 CNY 2/M tokens
   - 本地 Ollama: 免费
 
 Usage:
@@ -25,8 +25,8 @@ import httpx
 BASE_URL = "http://localhost:8000"
 
 # DeepSeek 定价 (元/百万 token)
-CLOUD_INPUT_PRICE = 1.0   # ¥1 / M tokens
-CLOUD_OUTPUT_PRICE = 2.0   # ¥2 / M tokens
+CLOUD_INPUT_PRICE = 1.0   # CNY 1 / M tokens
+CLOUD_OUTPUT_PRICE = 2.0   # CNY 2 / M tokens
 
 # --- 模拟日常使用场景 ---
 # 设计 15 条覆盖日常使用场景的查询，混合简单/复杂、敏感/非敏感
@@ -178,9 +178,9 @@ async def run_token_savings():
         try:
             resp = await client.get(f"{BASE_URL}/health", timeout=5.0)
             resp.raise_for_status()
-            print(f"✅ 后端连接正常: {resp.json()}")
+            print(f"[OK] 后端连接正常: {resp.json()}")
         except Exception as e:
-            print(f"❌ 无法连接后端 {BASE_URL}: {e}")
+            print(f"[FAIL] 无法连接后端 {BASE_URL}: {e}")
             return
 
         print("\n" + "=" * 70)
@@ -194,7 +194,7 @@ async def run_token_savings():
             try:
                 result = await send_query(scenario["query"], client)
             except Exception as e:
-                print(f"  ❌ 请求失败: {e}")
+                print(f"  [FAIL] 请求失败: {e}")
                 results["scenarios"].append({
                     **scenario,
                     "error": str(e),
@@ -244,7 +244,7 @@ async def run_token_savings():
             saved = pure_cloud_cost - our_cost
             print(f"  → Mode: {mode}, 实际路由: {route_label}")
             print(f"  → 估算 tokens: 输入~{prompt_tokens}, 输出~{completion_tokens}")
-            print(f"  → 纯云成本: ¥{pure_cloud_cost:.4f}, 我们: ¥{our_cost:.4f}, 节省: ¥{saved:.4f}")
+            print(f"  → 纯云成本: CNY {pure_cloud_cost:.4f}, 我们: CNY {our_cost:.4f}, 节省: CNY {saved:.4f}")
 
     # 汇总统计
     valid = [s for s in results["scenarios"] if "error" not in s]
@@ -280,11 +280,11 @@ async def run_token_savings():
     print(f"  总场景数:     {len(valid)}")
     print(f"  路由到本地:   {len(local_cases)} 个")
     print(f"  路由到云端:   {len(cloud_cases)} 个")
-    print(f"  纯云方案总成本: ¥{total_pure_cloud:.4f}")
-    print(f"  我们的方案成本: ¥{total_ours:.4f}")
-    print(f"  节省金额:      ¥{total_saved:.4f}")
+    print(f"  纯云方案总成本: CNY {total_pure_cloud:.4f}")
+    print(f"  我们的方案成本: CNY {total_ours:.4f}")
+    print(f"  节省金额:      CNY {total_saved:.4f}")
     print(f"  节省比例:      {savings_pct:.1f}%")
-    print(f"\n📄 详细结果已保存到: {out_path}")
+    print(f"\n>> 详细结果已保存到: {out_path}")
 
 
 if __name__ == "__main__":

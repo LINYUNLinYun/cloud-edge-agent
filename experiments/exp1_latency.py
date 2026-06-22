@@ -186,9 +186,9 @@ async def run_latency_tests():
         try:
             resp = await client.get(f"{BASE_URL}/health", timeout=5.0)
             resp.raise_for_status()
-            print(f"✅ 后端连接正常: {resp.json()}")
+            print(f"[OK] 后端连接正常: {resp.json()}")
         except Exception as e:
-            print(f"❌ 无法连接后端 {BASE_URL}: {e}")
+            print(f"[FAIL] 无法连接后端 {BASE_URL}: {e}")
             print("请先启动后端: python -m uvicorn app.main:app --port 8000")
             return
 
@@ -271,7 +271,7 @@ async def run_latency_tests():
         print(f"  平均总延迟: {stats['avg_total_ms']}ms")
         print(f"  TTFT 范围: {stats['min_ttft_ms']}ms ~ {stats['max_ttft_ms']}ms")
 
-    print(f"\n📄 详细结果已保存到: {out_path}")
+    print(f"\n>> 详细结果已保存到: {out_path}")
 
 
 if __name__ == "__main__":
